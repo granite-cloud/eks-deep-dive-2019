@@ -1,17 +1,19 @@
-AWSTemplateFormatVersion: '2010-09-09'
+---
+AWSTemplateFormatVersion: 2010-09-09
 
 Description: CodePipeline with EKS
+
 
 Parameters:
 
   EksClusterName:
     Type: String
     Description: The name of the EKS cluster created
-    Default: EKSDeepDive
+    Default: eks-cluster
     MinLength: 1
     MaxLength: 100
     ConstraintDescription: You must enter the EKS cluster name
-  
+
   GitSourceRepo:
     Type: String
     Description: GitHub source repository - must contain a Dockerfile and buildspec.yml in the base
@@ -51,6 +53,13 @@ Parameters:
     MaxLength: 100
     ConstraintDescription: You must enter a CodeBuild Docker image
 
+  KubectlRoleName:
+    Type: String
+    Default: EKSDeepDiveCodeBuildKubectlRole
+    Description: IAM role used by kubectl to interact with EKS cluster
+    MinLength: 3
+    MaxLength: 100
+    ConstraintDescription: You must enter a kubectl IAM role
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -101,27 +110,93 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
 
+  CustomResourceLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from botocore.vendored import requests
+          def handler(event, context):
+            response = {
+              'Status': 'SUCCESS',
+              "Reason": "See the details in CloudWatch Log Stream: " + context.log_stream_name,
+              'PhysicalResourceId': context.log_stream_name,
+              'StackId': event['StackId'],
+              'RequestId': event['RequestId'],
+              'LogicalResourceId': event['LogicalResourceId'],
+              'Data': {"Message": "Resource creation successful!"},
+            }
 
-  KubectlRole:
+            client = boto3.client('iam')
+            try:
+              if event['RequestType'] == 'Create':
+                kubectl_role_name = event['ResourceProperties']['KubectlRoleName']
+                build_role_arn = event['ResourceProperties']['CodeBuildServiceRoleArn']
+
+                assume = client.get_role(RoleName = kubectl_role_name)
+                assume_doc = assume['Role']['AssumeRolePolicyDocument']
+                roles = [ { 'Effect': 'Allow', 'Principal': { 'AWS': build_role_arn }, 'Action': 'sts:AssumeRole' } ]
+
+                for statement in assume_doc['Statement']:
+                  if 'AWS' in statement['Principal']:
+                    if statement['Principal']['AWS'].startswith('arn:aws:iam:'):
+                      roles.append(statement)
+
+                assume_doc['Statement'] = roles
+                update_response = client.update_assume_role_policy(RoleName = kubectl_role_name, PolicyDocument = json.dumps(assume_doc))
+            except Exception as e:
+              print(e)
+              response['Status'] = 'FAILED'
+              response["Reason"] = e
+              response['Data'] = {"Message": "Resource creation failed"}
+
+            response_body = json.dumps(response)
+            headers = {'content-type': '', "content-length": len(response_body) }
+            put_response = requests.put(event['ResponseURL'], headers=headers, data=response_body)
+            return response
+
+      Handler: index.handler
+      Role: !GetAtt CustomResourceLambdaExecutionRole.Arn
+      Runtime: python2.7
+      Timeout: 300
+
+  CustomResourceLambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaENIManagementAccess
       Path: /
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
           - Effect: Allow
-            Principal:
-              Service: eks.amazonaws.com
             Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
       Policies:
-        - PolicyName: !Sub ${AWS::StackName}-Kubectl
+        - PolicyName: codepipeline-access
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              - Resource: "*"
+              - Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${KubectlRoleName}
                 Effect: Allow
                 Action:
-                  - eks:DescribeCluster
+                  - iam:GetRole
+                  - iam:UpdateAssumeRolePolicy
+
+  KubectlAssumeRoleCustomResource:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambda.Arn
+      KubectlRoleName: !Ref KubectlRoleName
+      CodeBuildServiceRoleArn: !GetAtt CodeBuildServiceRole.Arn
+    DependsOn:
+      - CustomResourceLambda
+      - CodeBuildServiceRole
 
   CodePipelineServiceRole:
     Type: AWS::IAM::Role
@@ -158,7 +233,6 @@ Resources:
                   - s3:GetObjectVersion
                   - s3:GetBucketVersioning
     DependsOn: CodePipelineArtifactBucket
-
 
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
@@ -239,9 +313,10 @@ Resources:
           - Name: EKS_CLUSTER_NAME
             Value: !Ref EksClusterName
           - Name: EKS_KUBECTL_ROLE_ARN
-            Value: !GetAtt kubectlRole.Arn
+            Value: !Sub arn:aws:iam::${AWS::AccountId}:role/${KubectlRoleName}
       Name: !Ref AWS::StackName
       ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+    DependsOn: KubectlAssumeRoleCustomResource
 
   CodePipelineGitHub:
     Type: AWS::CodePipeline::Pipeline
@@ -257,13 +332,14 @@ Resources:
               ActionTypeId:
                 Category: Source
                 Owner: ThirdParty
-                Version: '1'
+                Version: 1
                 Provider: GitHub
               Configuration:
                 Owner: !Ref GitHubUser
                 Repo: !Ref GitSourceRepo
                 Branch: !Ref GitBranch
                 OAuthToken: !Ref GitHubToken
+                PollForSourceChanges: false
               OutputArtifacts:
                 - Name: App
               RunOrder: 1
@@ -273,7 +349,7 @@ Resources:
               ActionTypeId:
                 Category: Build
                 Owner: AWS
-                Version: '1'
+                Version: 1
                 Provider: CodeBuild
               Configuration:
                 ProjectName: !Ref CodeBuildProject
@@ -282,3 +358,20 @@ Resources:
               OutputArtifacts:
                 - Name: BuildOutput
               RunOrder: 1
+    DependsOn: CodeBuildProject
+
+
+  Webhook:
+   Type: 'AWS::CodePipeline::Webhook'
+   Properties:
+    AuthenticationConfiguration:
+      SecretToken: !Ref GitHubToken
+    Filters:
+    - JsonPath: "$.ref"
+      MatchEquals: refs/heads/{Branch}
+    Authentication: GITHUB_HMAC
+    TargetPipeline: !Ref CodePipelineGitHub
+    TargetAction: App
+    Name: GitHub-CodePipeline
+    TargetPipelineVersion: !GetAtt CodePipelineGitHub.Version
+    RegisterWithThirdParty: 'true'

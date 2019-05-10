@@ -99,7 +99,6 @@ Metadata:
       EksClusterName:
         default: EKS cluster name
 
-
 Resources:
 
   EcrDockerRepository:
@@ -110,6 +109,13 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
 
+  #########
+  # Lambda Resources
+  #########
+
+  # Lambda which uses a custom resource to trigger and adds the codebuild aim role to the trust relationship of the
+  # kubectl iam role which is used to perform the build and interact with kubectl. The kubectl iam role is mapped to
+  # the systems:masters k8s rbac role in the eks cluster.
   CustomResourceLambda:
     Type: AWS::Lambda::Function
     Properties:
@@ -188,6 +194,7 @@ Resources:
                   - iam:GetRole
                   - iam:UpdateAssumeRolePolicy
 
+  # Custom Resource to call Lambda
   KubectlAssumeRoleCustomResource:
     Type: Custom::CustomResource
     Properties:
@@ -198,6 +205,9 @@ Resources:
       - CustomResourceLambda
       - CodeBuildServiceRole
 
+  #########
+  # IAM Resources
+  #########
   CodePipelineServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -296,6 +306,9 @@ Resources:
                   - ecr:UploadLayerPart
                   - ecr:CompleteLayerUpload
 
+  #########
+  # CodePipeline/CodeBuild Resources
+  #########
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -364,7 +377,7 @@ Resources:
               RunOrder: 1
     DependsOn: CodeBuildProject
 
-
+  # Github webhook
   Webhook:
    Type: 'AWS::CodePipeline::Webhook'
    Properties:

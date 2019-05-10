@@ -1,17 +1,19 @@
-AWSTemplateFormatVersion: '2010-09-09'
+---
+AWSTemplateFormatVersion: 2010-09-09
 
-Description: CodePipeline & EKS
+Description: CodePipeline with EKS
+
 
 Parameters:
 
   EksClusterName:
     Type: String
     Description: The name of the EKS cluster created
-    Default: EKSDeepDive
+    Default: eks-cluster
     MinLength: 1
     MaxLength: 100
     ConstraintDescription: You must enter the EKS cluster name
-  
+
   GitSourceRepo:
     Type: String
     Description: GitHub source repository - must contain a Dockerfile and buildspec.yml in the base
@@ -59,7 +61,6 @@ Parameters:
     MaxLength: 100
     ConstraintDescription: You must enter a kubectl IAM role
 
-
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
@@ -98,7 +99,6 @@ Metadata:
       EksClusterName:
         default: EKS cluster name
 
-
 Resources:
 
   EcrDockerRepository:
@@ -109,6 +109,13 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
 
+  #########
+  # Lambda Resources
+  #########
+
+  # Lambda which uses a custom resource to trigger and adds the codebuild aim role to the trust relationship of the
+  # kubectl iam role which is used to perform the build and interact with kubectl. The kubectl iam role is mapped to
+  # the systems:masters k8s rbac role in the eks cluster.
   CustomResourceLambda:
     Type: AWS::Lambda::Function
     Properties:
@@ -187,13 +194,20 @@ Resources:
                   - iam:GetRole
                   - iam:UpdateAssumeRolePolicy
 
+  # Custom Resource to call Lambda
   KubectlAssumeRoleCustomResource:
     Type: Custom::CustomResource
     Properties:
       ServiceToken: !GetAtt CustomResourceLambda.Arn
       KubectlRoleName: !Ref KubectlRoleName
       CodeBuildServiceRoleArn: !GetAtt CodeBuildServiceRole.Arn
+    DependsOn:
+      - CustomResourceLambda
+      - CodeBuildServiceRole
 
+  #########
+  # IAM Resources
+  #########
   CodePipelineServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -292,6 +306,9 @@ Resources:
                   - ecr:UploadLayerPart
                   - ecr:CompleteLayerUpload
 
+  #########
+  # CodePipeline/CodeBuild Resources
+  #########
   CodeBuildProject:
     Type: AWS::CodeBuild::Project
     Properties:
@@ -332,13 +349,14 @@ Resources:
               ActionTypeId:
                 Category: Source
                 Owner: ThirdParty
-                Version: '1'
+                Version: 1
                 Provider: GitHub
               Configuration:
                 Owner: !Ref GitHubUser
                 Repo: !Ref GitSourceRepo
                 Branch: !Ref GitBranch
                 OAuthToken: !Ref GitHubToken
+                PollForSourceChanges: false
               OutputArtifacts:
                 - Name: App
               RunOrder: 1
@@ -348,7 +366,7 @@ Resources:
               ActionTypeId:
                 Category: Build
                 Owner: AWS
-                Version: '1'
+                Version: 1
                 Provider: CodeBuild
               Configuration:
                 ProjectName: !Ref CodeBuildProject
@@ -357,3 +375,20 @@ Resources:
               OutputArtifacts:
                 - Name: BuildOutput
               RunOrder: 1
+    DependsOn: CodeBuildProject
+
+  # Github webhook
+  Webhook:
+   Type: 'AWS::CodePipeline::Webhook'
+   Properties:
+    AuthenticationConfiguration:
+      SecretToken: !Ref GitHubToken
+    Filters:
+    - JsonPath: "$.ref"
+      MatchEquals: refs/heads/{Branch}
+    Authentication: GITHUB_HMAC
+    TargetPipeline: !Ref CodePipelineGitHub
+    TargetAction: App
+    Name: GitHub-CodePipeline
+    TargetPipelineVersion: !GetAtt CodePipelineGitHub.Version
+    RegisterWithThirdParty: 'true'

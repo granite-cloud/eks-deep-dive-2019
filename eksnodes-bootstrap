@@ -40,8 +40,12 @@ curl -O https://amazon-eks.s3-us-west-2.amazonaws.com/cloudformation/2018-11-07/
 kubectl apply -f aws-auth-cm.yaml
 kubectl get nodes --watch
 
-
+#####
 # Install helm
+#####
+
+# This will install helm in with a plugin that does NOT require the tiller server side and will run locally.
+# Still testing this
 export HELM_INSTALL_DIR=<>
 export PATH=/usr/local/sbin:$PATH # Place in users .bashrc profile
 curl -L https://git.io/get_helm.sh | bash

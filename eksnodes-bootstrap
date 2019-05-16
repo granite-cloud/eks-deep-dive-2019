@@ -40,8 +40,12 @@ curl -O https://amazon-eks.s3-us-west-2.amazonaws.com/cloudformation/2018-11-07/
 kubectl apply -f aws-auth-cm.yaml
 kubectl get nodes --watch
 
-
+#####
 # Install helm
+#####
+
+# This will install helm in with a plugin that does NOT require the tiller server side and will run locally.
+# Still testing this
 export HELM_INSTALL_DIR=<>
 export PATH=/usr/local/sbin:$PATH # Place in users .bashrc profile
 curl -L https://git.io/get_helm.sh | bash
@@ -49,3 +53,62 @@ curl -L https://git.io/get_helm.sh | bash
 
  # Install the tillerless plugin
  helm plugin install https://github.com/rimusz/helm-tiller
+
+
+# Normal install of helm with tiller
+Install and configure Helm and Tiller
+
+The easiest way to run and manage applications in a Kubernetes cluster is using Helm. Helm allows you to perform key operations for managing applications such as install, upgrade or delete. Helm is composed of two parts: Helm (the client) and Tiller (the server). Follow the steps below to complete both Helm and Tiller installation and create the necessary Kubernetes objects to make Helm work with Role-Based Access Control (RBAC):
+
+    To install Helm, run the following commands:
+
+    curl https://raw.githubusercontent.com/kubernetes/helm/master/scripts/get > get_helm.sh
+    chmod 700 get_helm.sh
+    ./get_helm.sh
+
+        TIP: If you are using OS X you can install it with the brew install command: brew install kubernetes-helm.
+
+    Create a ClusterRole configuration file with the content below. In this example, it is named clusterrole.yaml.
+
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      annotations:
+        rbac.authorization.kubernetes.io/autoupdate: "true"
+      labels:
+        kubernetes.io/bootstrapping: rbac-defaults
+      name: cluster-admin
+    rules:
+    - apiGroups:
+      - '*'
+      resources:
+      - '*'
+      verbs:
+      - '*'
+    - nonResourceURLs:
+      - '*'
+      verbs:
+      - '*'
+
+    To create the ClusterRole, run this command:
+
+    kubectl create -f clusterrole.yaml
+
+    To create a ServiceAccount and associate it with the ClusterRole, use a ClusterRoleBinding, as below:
+
+    kubectl create serviceaccount -n kube-system tiller
+    kubectl create clusterrolebinding tiller-cluster-rule --clusterrole=cluster-admin --serviceaccount=kube-system:tiller
+
+    Initialize Helm as shown below:
+
+    helm init --service-account tiller
+
+    If you have previously initialized Helm, execute the following command to upgrade it:
+
+    helm init --upgrade --service-account tiller
+
+    Check if Tiller is correctly installed by checking the output of kubectl get pods as shown below:
+
+    kubectl --namespace kube-system get pods | grep tiller
+      tiller-deploy-2885612843-xrj5m   1/1       Running   0   4d
+
